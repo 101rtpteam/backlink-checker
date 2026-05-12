@@ -117,6 +117,24 @@ def _normalize_domain(d: str) -> str:
     return d.rstrip("/")
 
 
+# ── JS-render detector ───────────────────────────────────────────────────────
+
+JS_SIGNALS = [
+    "__NEXT_DATA__", "window.__nuxt__", "__REACT_QUERY__",
+    "ng-version=", "data-reactroot", "gatsby-focus-wrapper",
+    "__svelte", "window.angular",
+]
+
+def _is_js_rendered(html: str) -> bool:
+    lower = html.lower()
+    # Very little visible text but lots of script tags = JS app
+    text_ratio = html.count("<p") + html.count("<div") + html.count("<article")
+    script_count = lower.count("<script")
+    if script_count > 10 and text_ratio < 5:
+        return True
+    return any(sig.lower() in lower for sig in JS_SIGNALS)
+
+
 # ── Backlink checker ──────────────────────────────────────────────────────────
 
 async def check_url(client: httpx.AsyncClient, page_url: str, target_domains: List[str]) -> LinkResult:
@@ -127,7 +145,11 @@ async def check_url(client: httpx.AsyncClient, page_url: str, target_domains: Li
         if resp.status_code >= 400:
             return LinkResult(url=page_url, found=False, links=[], status_code=resp.status_code, error=f"HTTP {resp.status_code}")
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        # Detect JS-rendered pages: little HTML but heavy JS signals
+        html = resp.text
+        js_rendered = _is_js_rendered(html)
+
+        soup = BeautifulSoup(html, "html.parser")
         found_links: List[FoundLink] = []
 
         for a in soup.find_all("a", href=True):
@@ -149,7 +171,8 @@ async def check_url(client: httpx.AsyncClient, page_url: str, target_domains: Li
                 anchor = a.get_text(strip=True) or href
                 found_links.append(FoundLink(href=href, anchor=anchor, rel=rel, target=matched_target))
 
-        return LinkResult(url=page_url, found=bool(found_links), links=found_links, status_code=resp.status_code, error=None)
+        js_warning = "Возможен JS-рендеринг — проверить вручную" if js_rendered and not found_links else None
+        return LinkResult(url=page_url, found=bool(found_links), links=found_links, status_code=resp.status_code, error=js_warning)
 
     except httpx.TimeoutException:
         return LinkResult(url=page_url, found=False, links=[], status_code=None, error="Timeout")
@@ -550,9 +573,11 @@ function appendRow(r) {
   const tbody = document.getElementById('resultsBody');
   const links = r.links || [];
 
+  const isJsWarning = !r.found && r.error && r.error.includes('JS');
   const linkBadge = r.found
     ? '<span class="badge badge-found">✓ Найдена</span>'
-    : r.error ? '<span class="badge badge-error">⚠ Ошибка</span>'
+    : isJsWarning ? `<span class="badge badge-error" style="background:#1e2a1e;color:#fbbf24" title="${r.error}">⚠ JS-рендеринг</span>`
+    : r.error ? `<span class="badge badge-error" title="${r.error}">⚠ Ошибка</span>`
     : '<span class="badge badge-missing">✗ Нет</span>';
 
   let indexBadge = '<span class="badge badge-na">...</span>';
