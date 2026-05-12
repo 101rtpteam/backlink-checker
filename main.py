@@ -176,6 +176,9 @@ async def check_url(client: httpx.AsyncClient, page_url: str, target_domains: Li
 
     except httpx.TimeoutException:
         return LinkResult(url=page_url, found=False, links=[], status_code=None, error="Timeout")
+    except httpx.ConnectError as e:
+        msg = "DNS: сайт недоступен" if "Name or service not known" in str(e) or "Errno -3" in str(e) or "Errno 8" in str(e) else "Ошибка соединения"
+        return LinkResult(url=page_url, found=False, links=[], status_code=None, error=msg)
     except Exception as e:
         return LinkResult(url=page_url, found=False, links=[], status_code=None, error=str(e))
 
@@ -573,11 +576,15 @@ function appendRow(r) {
   const tbody = document.getElementById('resultsBody');
   const links = r.links || [];
 
-  const isJsWarning = !r.found && r.error && r.error.includes('JS');
+  const isJsWarning  = !r.found && r.error && r.error.includes('JS');
+  const isDns        = !r.found && r.error && r.error.includes('DNS');
+  const isTimeout    = !r.found && r.error && r.error.includes('Timeout');
   const linkBadge = r.found
     ? '<span class="badge badge-found">✓ Найдена</span>'
-    : isJsWarning ? `<span class="badge badge-error" style="background:#1e2a1e;color:#fbbf24" title="${r.error}">⚠ JS-рендеринг</span>`
-    : r.error ? `<span class="badge badge-error" title="${r.error}">⚠ Ошибка</span>`
+    : isJsWarning ? `<span class="badge" style="background:#2a2000;color:#fbbf24" title="${r.error}">⚠ JS-рендеринг</span>`
+    : isDns       ? `<span class="badge" style="background:#1e1e2a;color:#94a3b8" title="${r.error}">⊘ Недоступен</span>`
+    : isTimeout   ? `<span class="badge" style="background:#1e1e2a;color:#94a3b8" title="${r.error}">⊘ Таймаут</span>`
+    : r.error     ? `<span class="badge badge-error" title="${r.error}">⚠ Ошибка</span>`
     : '<span class="badge badge-missing">✗ Нет</span>';
 
   let indexBadge = '<span class="badge badge-na">...</span>';
