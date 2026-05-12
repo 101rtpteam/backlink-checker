@@ -32,8 +32,10 @@ HEADERS = {
 }
 
 TIMEOUT = 20
+import os
+
 DFS_URL = "https://api.dataforseo.com/v3/serp/google/organic/live/regular"
-DFS_CREDENTIALS = "c2VydmljZXNAMTAxcnRwLmNvbTo2ZjNiNzgzOGQ1N2Y3OTRl"
+DFS_CREDENTIALS = os.environ.get("DFS_CREDENTIALS", "")
 DB_PATH = Path(__file__).parent / "history.db"
 
 
@@ -473,7 +475,7 @@ function runCheck() {
   updateProgress(0, urls.length);
   resetStats();
 
-  const ws = new WebSocket(`ws://${location.host}/ws/check`);
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/check`);
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ urls, target_domains }));
@@ -630,7 +632,7 @@ function retryMissing() {
   pw.style.display = 'block';
   updateProgress(0, missingUrls.length);
 
-  const ws = new WebSocket(`ws://${location.host}/ws/check`);
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/check`);
   ws.onopen = () => ws.send(JSON.stringify({ urls: missingUrls, target_domains, skip_indexation: true }));
 
   ws.onmessage = (e) => {
@@ -718,7 +720,7 @@ function retryErrors() {
   pw.style.display = 'block';
   updateProgress(0, errorUrls.length);
 
-  const ws = new WebSocket(`ws://${location.host}/ws/check`);
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/check`);
   ws.onopen = () => ws.send(JSON.stringify({ urls: errorUrls, target_domains }));
 
   ws.onmessage = (e) => {
