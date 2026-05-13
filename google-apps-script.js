@@ -7,7 +7,7 @@
 //   2. Вставить этот код
 //   3. Запустить checkBacklinks() или настроить триггер
 
-const API_URL = "https://backlink-checker-production.up.railway.app/api/check-single";
+const API_URL = "https://backlink-checker.up.railway.app/api/check-single";
 
 // Домены которые ищем на страницах гест-постов
 const TARGET_DOMAINS = ["101rtp.com", "101rtp.nz", "101-rtp.nz"];
