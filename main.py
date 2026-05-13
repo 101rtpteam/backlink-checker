@@ -258,6 +258,70 @@ async def ws_check(ws: WebSocket):
         await ws.send_json({"type": "error", "message": str(e)})
 
 
+# ── REST: single URL check (for Google Apps Script) ──────────────────────────
+
+class SingleCheckRequest(BaseModel):
+    url: str
+    target_domains: List[str]
+
+class SingleCheckResponse(BaseModel):
+    url: str
+    exists: str        # "Yes" | "No" | "404" | "JS-рендеринг" | "Недоступен" | "Таймаут"
+    indexed: str       # "Yes" | "No" | "Error"
+    dofollow: str      # "Yes" | "No" | ""
+    anchor: str        # first anchor text found, or ""
+    link_url: str      # first href found, or ""
+
+@app.post("/api/check-single", response_model=SingleCheckResponse)
+async def check_single(req: SingleCheckRequest):
+    async with httpx.AsyncClient() as client:
+        result = await check_url(client, req.url, req.target_domains)
+        indexed_val, _ = await check_indexed(client, req.url)
+
+    # Exists
+    if result.found:
+        exists = "Yes"
+    elif result.error and "JS" in result.error:
+        exists = "JS-рендеринг"
+    elif result.error and "DNS" in result.error:
+        exists = "Недоступен"
+    elif result.error and "Timeout" in result.error:
+        exists = "Таймаут"
+    elif result.status_code == 404:
+        exists = "404"
+    elif result.error:
+        exists = "No"
+    else:
+        exists = "No"
+
+    # Indexed
+    if indexed_val is True:
+        indexed = "Yes"
+    elif indexed_val is False:
+        indexed = "No"
+    else:
+        indexed = "Error"
+
+    # Dofollow / anchor
+    dofollow = ""
+    anchor = ""
+    link_url = ""
+    if result.links:
+        first = result.links[0]
+        dofollow = "Yes" if first.rel == "dofollow" else "No"
+        anchor = first.anchor
+        link_url = first.href
+
+    return SingleCheckResponse(
+        url=req.url,
+        exists=exists,
+        indexed=indexed,
+        dofollow=dofollow,
+        anchor=anchor,
+        link_url=link_url,
+    )
+
+
 # ── REST: history ─────────────────────────────────────────────────────────────
 
 @app.get("/history")
