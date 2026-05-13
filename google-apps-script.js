@@ -48,20 +48,24 @@ function checkBacklinks() {
     try {
       const result = callAPI(guestpost);
 
-      sheet.getRange(row, COL_EXISTS).setValue(result.exists);
+      // Маппинг exists под дропдаун таблицы: Yes / No / 404 / Other
+      let existsVal;
+      if (result.exists === "Yes")       existsVal = "Yes";
+      else if (result.exists === "404")  existsVal = "404";
+      else if (result.exists === "No")   existsVal = "No";
+      else                               existsVal = "Other"; // JS-рендеринг / Недоступен / Таймаут
+
+      sheet.getRange(row, COL_EXISTS).setValue(existsVal);
       sheet.getRange(row, COL_INDEX).setValue(result.indexed);
       sheet.getRange(row, COL_DOFOLLOW).setValue(result.dofollow);
       sheet.getRange(row, COL_ANCHOR).setValue(result.anchor);
 
-      // Подсветка строки если ссылка не найдена
+      // Подсветка ячейки M
       const range = sheet.getRange(row, COL_EXISTS);
-      if (result.exists === "Yes") {
-        range.setBackground("#d9ead3"); // зелёный
-      } else if (result.exists === "No") {
-        range.setBackground("#f4cccc"); // красный
-      } else {
-        range.setBackground("#fff2cc"); // жёлтый
-      }
+      if (existsVal === "Yes")        range.setBackground("#d9ead3"); // зелёный
+      else if (existsVal === "No")    range.setBackground("#f4cccc"); // красный
+      else if (existsVal === "404")   range.setBackground("#f4cccc"); // красный
+      else                            range.setBackground("#fff2cc"); // жёлтый (Other)
 
       processed++;
       Utilities.sleep(500); // пауза между запросами
@@ -98,7 +102,12 @@ function checkSelected() {
 
     try {
       const result = callAPI(guestpost);
-      sheet.getRange(row, COL_EXISTS).setValue(result.exists);
+      let existsVal;
+      if (result.exists === "Yes")       existsVal = "Yes";
+      else if (result.exists === "404")  existsVal = "404";
+      else if (result.exists === "No")   existsVal = "No";
+      else                               existsVal = "Other";
+      sheet.getRange(row, COL_EXISTS).setValue(existsVal);
       sheet.getRange(row, COL_INDEX).setValue(result.indexed);
       sheet.getRange(row, COL_DOFOLLOW).setValue(result.dofollow);
       sheet.getRange(row, COL_ANCHOR).setValue(result.anchor);
