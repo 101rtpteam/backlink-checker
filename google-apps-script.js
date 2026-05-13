@@ -72,7 +72,7 @@ function checkBacklinks() {
 
     } catch (e) {
       Logger.log(`Ошибка строки ${row}: ${e.message}`);
-      sheet.getRange(row, COL_EXISTS).setValue("Error: " + e.message.slice(0, 50));
+      sheet.getRange(row, COL_EXISTS).setValue("Other"); // "Error:..." нарушает data validation
     }
   }
 
@@ -142,6 +142,66 @@ function callAPI(url) {
   }
 
   return JSON.parse(response.getContentText());
+}
+
+// ── Диагностика: проверяем API и запись в ячейки ─────────────────────────────
+function testAPIAndWrite() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Guestposting");
+  if (!sheet) { Logger.log("ЛИСТ НЕ НАЙДЕН"); return; }
+
+  // 1. Пробуем записать тестовое значение в M2
+  sheet.getRange(2, COL_EXISTS).setValue("TEST_WRITE");
+  SpreadsheetApp.flush();
+  const readBack = sheet.getRange(2, COL_EXISTS).getValue();
+  Logger.log("Запись в M2 → прочитано обратно: " + readBack);
+
+  // 2. Берём первую строку с Published + URL
+  const lastRow = sheet.getLastRow();
+  let testURL = null;
+  let testRow = null;
+  for (let i = 2; i <= lastRow; i++) {
+    const status   = String(sheet.getRange(i, COL_STATUS).getValue()).trim();
+    const guestpost = String(sheet.getRange(i, COL_GUESTPOST).getValue()).trim();
+    if (status === "Published" && guestpost.startsWith("http")) {
+      testURL = guestpost;
+      testRow = i;
+      break;
+    }
+  }
+
+  if (!testURL) { Logger.log("Нет строк с Published + URL"); return; }
+  Logger.log("Тестируем строку " + testRow + ": " + testURL);
+
+  // 3. Вызываем API и логируем сырой ответ
+  try {
+    const payload = JSON.stringify({ url: testURL, target_domains: TARGET_DOMAINS });
+    const options = {
+      method: "post",
+      contentType: "application/json",
+      payload: payload,
+      muteHttpExceptions: true
+    };
+    const response = UrlFetchApp.fetch(API_URL, options);
+    const code = response.getResponseCode();
+    const text = response.getContentText();
+    Logger.log("HTTP код: " + code);
+    Logger.log("Ответ API: " + text);
+
+    if (code === 200) {
+      const result = JSON.parse(text);
+      Logger.log("exists=" + result.exists + " indexed=" + result.indexed + " dofollow=" + result.dofollow + " anchor=" + result.anchor);
+
+      // 4. Пишем в реальные ячейки
+      sheet.getRange(testRow, COL_EXISTS).setValue(result.exists || "N/A");
+      sheet.getRange(testRow, COL_INDEX).setValue(result.indexed || "N/A");
+      sheet.getRange(testRow, COL_DOFOLLOW).setValue(result.dofollow || "N/A");
+      sheet.getRange(testRow, COL_ANCHOR).setValue(result.anchor || "");
+      SpreadsheetApp.flush();
+      Logger.log("Данные записаны в строку " + testRow);
+    }
+  } catch (e) {
+    Logger.log("Ошибка: " + e.message);
+  }
 }
 
 // Добавить кнопки в меню таблицы
