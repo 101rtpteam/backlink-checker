@@ -1150,33 +1150,48 @@ function updateRowIndexation(url, indexed, indexError) {
 }
 
 async function loadHistory() {
-  const el   = document.getElementById('historyList');
-  const runs = await fetch('/history').then(r => r.json());
-  if (!runs.length) { el.innerHTML = '<div class="empty">История проверок пуста</div>'; return; }
-  el.innerHTML = runs.map(r => `
-    <div class="history-item" onclick="loadHistoryRun(${r.id})">
-      <div class="history-meta">
-        <div class="history-domain">${r.target_domain}</div>
-        <div class="history-date">${r.created_at}</div>
+  const el = document.getElementById('historyList');
+  el.innerHTML = '<div class="empty">Загрузка...</div>';
+  try {
+    const resp = await fetch('/history');
+    if (resp.status === 401) { el.innerHTML = '<div class="empty">Сессия истекла — обновите страницу</div>'; return; }
+    if (!resp.ok) { el.innerHTML = `<div class="empty">Ошибка загрузки (${resp.status})</div>`; return; }
+    const runs = await resp.json();
+    if (!runs.length) { el.innerHTML = '<div class="empty">История проверок пуста</div>'; return; }
+    el.innerHTML = runs.map(r => `
+      <div class="history-item" onclick="loadHistoryRun(${r.id})">
+        <div class="history-meta">
+          <div class="history-domain">${r.target_domain}</div>
+          <div class="history-date">${r.created_at}</div>
+        </div>
+        <div class="history-stats">
+          <span>${r.total} URL</span>
+          <span class="green">${r.found} ссылок</span>
+          <span class="blue">${r.indexed} в индексе</span>
+        </div>
       </div>
-      <div class="history-stats">
-        <span>${r.total} URL</span>
-        <span class="green">${r.found} ссылок</span>
-        <span class="blue">${r.indexed} в индексе</span>
-      </div>
-    </div>
-  `).join('');
+    `).join('');
+  } catch(e) {
+    el.innerHTML = `<div class="empty">Ошибка: ${e.message}</div>`;
+  }
 }
 
 async function loadHistoryRun(id) {
-  const data = await fetch(`/history/${id}`).then(r => r.json());
-  switchTab('check');
-  document.getElementById('domains').value = data.target_domain.split(', ').join('\n');
-  allResults = data.results;
-  document.getElementById('resultsBody').innerHTML = '';
-  data.results.forEach(appendRow);
-  recalcStats();
-  document.getElementById('results').style.display = 'block';
+  try {
+    const resp = await fetch(`/history/${id}`);
+    if (resp.status === 401) { alert('Сессия истекла — обновите страницу'); return; }
+    if (!resp.ok) { alert(`Ошибка загрузки прогона (${resp.status})`); return; }
+    const data = await resp.json();
+    switchTab('check');
+    document.getElementById('domains').value = data.target_domain.split(', ').join('\n');
+    allResults = data.results;
+    document.getElementById('resultsBody').innerHTML = '';
+    data.results.forEach(appendRow);
+    recalcStats();
+    document.getElementById('results').style.display = 'block';
+  } catch(e) {
+    alert(`Ошибка: ${e.message}`);
+  }
 }
 </script>
 </body>
