@@ -11,6 +11,10 @@ from urllib.parse import urlparse, quote_plus, parse_qs
 
 import httpx
 from bs4 import BeautifulSoup
+try:
+    from curl_cffi.requests import AsyncSession as CffiSession  # TLS-отпечаток настоящего Chrome
+except ImportError:  # локально без curl_cffi — просто не будет обхода Cloudflare
+    CffiSession = None
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -479,6 +483,36 @@ async def check_url_direct(
         return LinkResult(url=page_url, found=False, links=[], status_code=None, error=str(e))
 
 
+# ── Обход Cloudflare / антибот-защиты: запрос с отпечатком Chrome ────────────
+
+async def check_url_browserlike(page_url: str, targets: List[str]) -> Optional[LinkResult]:
+    """
+    Cloudflare и похожие защиты режут httpx по TLS-отпечатку (403), хотя в браузере
+    страница открывается. curl_cffi повторяет TLS/HTTP2-отпечаток Chrome.
+    Возвращает None, если curl_cffi недоступен.
+    """
+    if CffiSession is None:
+        return None
+    last_status, last_error = None, None
+    for profile in ("chrome", "safari"):
+        try:
+            async with CffiSession(impersonate=profile) as s:
+                resp = await s.get(page_url, timeout=TIMEOUT, allow_redirects=True,
+                                   headers={"Accept-Language": "en-US,en;q=0.9"})
+        except Exception as e:
+            last_error = f"Ошибка загрузки: {str(e)[:80]}"
+            continue
+        last_status = resp.status_code
+        if resp.status_code >= 400:
+            continue
+        found_links, js_rendered = _parse_links_from_html(resp.text, page_url, targets)
+        js_warning = "Возможен JS-рендеринг — проверить вручную" if js_rendered and not found_links else None
+        return LinkResult(url=page_url, found=bool(found_links), links=found_links,
+                          status_code=resp.status_code, error=js_warning)
+    return LinkResult(url=page_url, found=False, links=[], status_code=last_status,
+                      error=last_error or (f"HTTP {last_status}" if last_status else None))
+
+
 # ── Основной роутер проверки ссылки ───────────────────────────────────────────
 
 async def check_url(
@@ -488,13 +522,12 @@ async def check_url(
 
     result = await check_url_direct(client, page_url, targets)
 
-    # Если прямой запрос заблокирован — пробуем fallback через site: + Googlebot
+    # Если прямой запрос заблокирован — повторяем как настоящий браузер (обход Cloudflare).
+    # Старый fallback через Google site: убран: с серверов Railway Google всегда отвечает 429.
     if not result.found and _is_blocked(result.status_code, result.error):
-        fallback = await check_url_via_site_operator(client, page_url, targets)
-        if fallback.found:
-            fallback.status_code = result.status_code
-            return fallback
-        # Fallback не помог — показываем исходную причину, а не ошибку Google
+        retry = await check_url_browserlike(page_url, targets)
+        if retry is not None and retry.status_code and retry.status_code < 400:
+            return retry
         result.error = f"{result.error or 'HTTP ' + str(result.status_code)} (сайт блокирует проверку — откройте вручную)"
         return result
 
