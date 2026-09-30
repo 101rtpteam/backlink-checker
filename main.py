@@ -4,6 +4,7 @@ import secrets
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -39,7 +40,12 @@ TIMEOUT = 20
 DFS_URL = "https://api.dataforseo.com/v3/serp/google/organic/live/regular"
 DFS_CREDENTIALS = os.environ.get("DFS_CREDENTIALS", "")
 
-# ── Persistent storage: /data/history.db on Railway Volume, fallback to local ──
+# ── Storage ───────────────────────────────────────────────────────────────────
+# Если задан DATABASE_URL (Railway Postgres) — работаем с Postgres.
+# Иначе — SQLite: /data/history.db на Railway Volume, fallback на локальный файл.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
 _data_dir = Path("/data")
 if not _data_dir.exists():
     try:
@@ -48,6 +54,13 @@ if not _data_dir.exists():
         _data_dir = Path(__file__).parent
 
 DB_PATH = _data_dir / "history.db"
+
+# ── Кэш индексации ────────────────────────────────────────────────────────────
+# Положительный результат ("в индексе") живёт дольше: страницы редко выпадают.
+# Отрицательный — короче: новый гест-пост может попасть в индекс через пару дней.
+# Ошибки (нет баланса, таймаут) не кэшируются никогда.
+INDEX_CACHE_TTL_POSITIVE_H = float(os.environ.get("INDEX_CACHE_TTL_POSITIVE_HOURS", 24 * 14))
+INDEX_CACHE_TTL_NEGATIVE_H = float(os.environ.get("INDEX_CACHE_TTL_NEGATIVE_HOURS", 24 * 2))
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -67,21 +80,95 @@ def _check_session(request: Request) -> bool:
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
+if USE_PG:
+    import psycopg
+
+
+def _connect():
+    if USE_PG:
+        return psycopg.connect(DATABASE_URL)
+    return sqlite3.connect(DB_PATH)
+
+
+def _q(sql: str) -> str:
+    """SQL пишем с '?' — для Postgres меняем на '%s'."""
+    return sql.replace("?", "%s") if USE_PG else sql
+
+
+def _db_exec(sql: str, params: tuple = (), fetch: Optional[str] = None):
+    """Один запрос = одно соединение. Нагрузка у инструмента маленькая, пул не нужен."""
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(_q(sql), params)
+        out = None
+        if fetch == "one":
+            out = cur.fetchone()
+        elif fetch == "all":
+            out = cur.fetchall()
+        conn.commit()
+        return out
+    finally:
+        conn.close()
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
+    id_col = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    ts_col = "DOUBLE PRECISION" if USE_PG else "REAL"
+    _db_exec(f"""
         CREATE TABLE IF NOT EXISTS runs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at  TEXT    NOT NULL,
-            target_domain TEXT  NOT NULL,
-            total       INTEGER,
-            found       INTEGER,
-            indexed     INTEGER,
-            results_json TEXT
+            id            {id_col},
+            created_at    TEXT    NOT NULL,
+            target_domain TEXT    NOT NULL,
+            total         INTEGER,
+            found         INTEGER,
+            indexed       INTEGER,
+            results_json  TEXT
         )
     """)
-    conn.commit()
-    conn.close()
+    _db_exec(f"""
+        CREATE TABLE IF NOT EXISTS index_cache (
+            url_key     TEXT PRIMARY KEY,
+            url         TEXT NOT NULL,
+            indexed     BOOLEAN NOT NULL,
+            checked_at  {ts_col} NOT NULL
+        )
+    """)
+    if USE_PG:
+        _migrate_sqlite_to_pg()
+
+
+def _migrate_sqlite_to_pg():
+    """Разовый перенос истории из старого SQLite (Railway Volume) в пустой Postgres."""
+    if not DB_PATH.exists():
+        return
+    if _db_exec("SELECT COUNT(*) FROM runs", fetch="one")[0] > 0:
+        return
+    try:
+        src = sqlite3.connect(DB_PATH)
+        rows = src.execute(
+            "SELECT created_at, target_domain, total, found, indexed, results_json "
+            "FROM runs ORDER BY id"
+        ).fetchall()
+        src.close()
+    except sqlite3.Error as e:
+        print(f"[migrate] SQLite read failed: {e}")
+        return
+    if not rows:
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO runs (created_at, target_domain, total, found, indexed, results_json) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                rows,
+            )
+        conn.commit()
+        print(f"[migrate] Перенесено {len(rows)} прогонов из SQLite в Postgres")
+    finally:
+        conn.close()
+
 
 init_db()
 
@@ -89,8 +176,7 @@ init_db()
 def save_run(target_domain: str, results: list):
     found   = sum(1 for r in results if r["found"])
     indexed = sum(1 for r in results if r.get("indexed") is True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
+    _db_exec(
         "INSERT INTO runs (created_at, target_domain, total, found, indexed, results_json) "
         "VALUES (?,?,?,?,?,?)",
         (
@@ -102,17 +188,14 @@ def save_run(target_domain: str, results: list):
             json.dumps(results, ensure_ascii=False),
         ),
     )
-    conn.commit()
-    conn.close()
 
 
 def load_runs():
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
+    rows = _db_exec(
         "SELECT id, created_at, target_domain, total, found, indexed "
-        "FROM runs ORDER BY id DESC LIMIT 100"
-    ).fetchall()
-    conn.close()
+        "FROM runs ORDER BY id DESC LIMIT 100",
+        fetch="all",
+    )
     return [
         {"id": r[0], "created_at": r[1], "target_domain": r[2],
          "total": r[3], "found": r[4], "indexed": r[5]}
@@ -121,15 +204,53 @@ def load_runs():
 
 
 def load_run_results(run_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
+    row = _db_exec(
         "SELECT results_json, created_at, target_domain FROM runs WHERE id=?",
-        (run_id,)
-    ).fetchone()
-    conn.close()
+        (run_id,), fetch="one",
+    )
     if not row:
         return None
     return {"results": json.loads(row[0]), "created_at": row[1], "target_domain": row[2]}
+
+
+# ── Index cache ───────────────────────────────────────────────────────────────
+
+def _url_key(url: str) -> str:
+    """Нормализованный ключ URL: без схемы, www, завершающего слэша и #фрагмента."""
+    u = url.strip()
+    if "://" not in u:
+        u = "https://" + u
+    p = urlparse(u)
+    host = p.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = p.path.rstrip("/")
+    query = f"?{p.query}" if p.query else ""
+    return f"{host}{path}{query}"
+
+
+def cache_get(url: str) -> Optional[tuple]:
+    """Вернуть (indexed, checked_at) если запись свежая, иначе None."""
+    row = _db_exec(
+        "SELECT indexed, checked_at FROM index_cache WHERE url_key=?",
+        (_url_key(url),), fetch="one",
+    )
+    if not row:
+        return None
+    indexed, checked_at = bool(row[0]), float(row[1])
+    ttl_h = INDEX_CACHE_TTL_POSITIVE_H if indexed else INDEX_CACHE_TTL_NEGATIVE_H
+    if time.time() - checked_at > ttl_h * 3600:
+        return None
+    return indexed, checked_at
+
+
+def cache_put(url: str, indexed: bool):
+    _db_exec(
+        "INSERT INTO index_cache (url_key, url, indexed, checked_at) VALUES (?,?,?,?) "
+        "ON CONFLICT (url_key) DO UPDATE SET "
+        "url=excluded.url, indexed=excluded.indexed, checked_at=excluded.checked_at",
+        (_url_key(url), url, indexed, time.time()),
+    )
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -155,6 +276,8 @@ class LinkResult(BaseModel):
     via_cache: bool = False   # True = ссылка найдена через site: SERP-кэш
     indexed: Optional[bool] = None
     index_error: Optional[str] = None
+    index_cached: bool = False          # True = индексация взята из кэша, DataForSEO не вызывался
+    index_checked_at: Optional[str] = None
 
 
 def _normalize_domain(d: str) -> str:
@@ -411,6 +534,8 @@ async def check_indexed(client: httpx.AsyncClient, page_url: str) -> tuple:
         )
         if resp.status_code == 401:
             return None, "Неверные credentials DataForSEO"
+        if resp.status_code == 402:
+            return None, "DFS: нет баланса"
         if resp.status_code != 200:
             return None, f"DataForSEO error {resp.status_code}"
 
@@ -418,20 +543,47 @@ async def check_indexed(client: httpx.AsyncClient, page_url: str) -> tuple:
         code = task.get("status_code")
         if code == 40102:
             return False, None
-        if code == 40200:
-            return None, "Нет баланса DataForSEO"
+        if code in (40200, 40210):
+            return None, "DFS: нет баланса"
         if code != 20000:
             return None, task.get("status_message", f"Ошибка {code}")
 
         items = (task.get("result") or [{}])[0].get("items") or []
-        norm = page_url.rstrip("/").lower()
+        # Сравниваем нормализованно: http/https, www и слэш в конце не должны давать ложное "нет"
+        norm = _url_key(page_url)
         for item in items:
-            if (item.get("url") or "").rstrip("/").lower() == norm:
+            if item.get("url") and _url_key(item["url"]) == norm:
                 return True, None
         return False, None
 
     except Exception as e:
         return None, str(e)
+
+
+async def check_indexed_cached(client: httpx.AsyncClient, page_url: str) -> dict:
+    """Индексация с кэшем: сначала БД, в DataForSEO — только при промахе/истёкшем TTL."""
+    try:
+        hit = await asyncio.to_thread(cache_get, page_url)
+    except Exception as e:
+        print(f"[cache] read failed: {e}")
+        hit = None
+    if hit is not None:
+        indexed, checked_at = hit
+        return {
+            "indexed": indexed, "index_error": None, "index_cached": True,
+            "index_checked_at": datetime.fromtimestamp(checked_at).strftime("%Y-%m-%d %H:%M"),
+        }
+
+    indexed, err = await check_indexed(client, page_url)
+    if indexed is not None:
+        try:
+            await asyncio.to_thread(cache_put, page_url, indexed)
+        except Exception as e:
+            print(f"[cache] write failed: {e}")
+    return {
+        "indexed": indexed, "index_error": err, "index_cached": False,
+        "index_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M") if indexed is not None else None,
+    }
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
@@ -471,16 +623,19 @@ async def ws_check(ws: WebSocket):
 
             for i, result in enumerate(link_results):
                 if not skip_indexation:
-                    indexed, err = await check_indexed(client, result.url)
-                    result.indexed     = indexed
-                    result.index_error = err
-                    await asyncio.sleep(0.3)
+                    idx = await check_indexed_cached(client, result.url)
+                    result.indexed          = idx["indexed"]
+                    result.index_error      = idx["index_error"]
+                    result.index_cached     = idx["index_cached"]
+                    result.index_checked_at = idx["index_checked_at"]
+                    if not idx["index_cached"]:
+                        await asyncio.sleep(0.3)
 
                 r = result.dict()
                 results.append(r)
                 await ws.send_json({"type": "progress", "done": i + 1, "total": total, "result": r})
 
-        save_run(", ".join(target_domains), results)
+        await asyncio.to_thread(save_run, ", ".join(target_domains), results)
         await ws.send_json({"type": "done", "results": results})
 
     except WebSocketDisconnect:
@@ -509,7 +664,7 @@ class SingleCheckResponse(BaseModel):
 async def check_single(req: SingleCheckRequest):
     async with httpx.AsyncClient() as client:
         result = await check_url(client, req.url, req.target_domains)
-        indexed_val, _ = await check_indexed(client, req.url)
+        indexed_val = (await check_indexed_cached(client, req.url))["indexed"]
 
     if result.found and result.via_cache:
         exists = "Via Cache"
@@ -640,7 +795,7 @@ async def logout(request: Request, response: Response):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "db": str(DB_PATH)}
+    return {"status": "ok", "db": "postgres" if USE_PG else f"sqlite:{DB_PATH}"}
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -949,8 +1104,9 @@ function appendRow(r) {
                 : '<span class="badge badge-missing">✗ Нет</span>';
 
   let indexBadge = '<span class="badge badge-na">...</span>';
-  if (r.indexed === true)        indexBadge = '<span class="badge badge-indexed">✓ В индексе</span>';
-  else if (r.indexed === false)  indexBadge = '<span class="badge badge-noindex">✗ Не в индексе</span>';
+  const cacheMark = r.index_cached ? ` <span style="color:#64748b;font-size:0.7rem" title="Из кэша, проверено ${r.index_checked_at || ''}">кэш</span>` : '';
+  if (r.indexed === true)        indexBadge = '<span class="badge badge-indexed">✓ В индексе</span>' + cacheMark;
+  else if (r.indexed === false)  indexBadge = '<span class="badge badge-noindex">✗ Не в индексе</span>' + cacheMark;
   else if (r.index_error)        indexBadge = `<span class="badge badge-error" title="${r.index_error}">⚠ ${r.index_error.length > 20 ? r.index_error.slice(0,20)+'…' : r.index_error}</span>`;
 
   const httpBadge = r.status_code

@@ -151,3 +151,12 @@ DataForSEO тарифицирует **$0.01 за каждую проверку �
 При $10 на балансе — 1000 проверок.
 
 Пополнить баланс: [app.dataforseo.com](https://app.dataforseo.com) → Add Funds.
+
+## Хранилище и кэш индексации
+
+- `DATABASE_URL` — строка подключения к Postgres (в Railway: `${{Postgres.DATABASE_URL}}`). Если не задана — используется SQLite `/data/history.db`.
+- При первом старте на Postgres история из старого SQLite (`/data/history.db`) переносится автоматически, если таблица `runs` пуста.
+- Кэш индексации (таблица `index_cache`): повторная проверка того же URL не вызывает DataForSEO, пока не истёк TTL.
+  - `INDEX_CACHE_TTL_POSITIVE_HOURS` — сколько хранить «в индексе» (по умолчанию 336 ч = 14 дней)
+  - `INDEX_CACHE_TTL_NEGATIVE_HOURS` — сколько хранить «не в индексе» (по умолчанию 48 ч)
+  - Ошибки (нет баланса, таймаут) не кэшируются.
