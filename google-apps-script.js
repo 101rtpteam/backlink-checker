@@ -1,5 +1,5 @@
 // ── Backlink Checker — Google Apps Script ────────────────────────────────────
-// Заполняет колонки M (Exists), N (Index), O (Dofollow), P (Anchor)
+// Заполняет колонки M (Exists), N (Index), O (Dofollow)
 // для строк где K = "Published" и L не пустая
 //
 // Установка:
@@ -18,16 +18,11 @@ const COL_GUESTPOST    = 12;  // L — ссылка на гест-пост
 const COL_EXISTS       = 13;  // M — есть ли ссылка
 const COL_INDEX        = 14;  // N — индексация
 const COL_DOFOLLOW     = 15;  // O — dofollow
-const COL_ANCHOR       = 16;  // P — anchor text (новая колонка)
 
 function checkBacklinks() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Guestposting");
   const lastRow = sheet.getLastRow();
-  const data = sheet.getRange(2, 1, lastRow - 1, COL_ANCHOR).getValues();
-
-  // Заголовок для новой колонки если пустой
-  const headerCell = sheet.getRange(1, COL_ANCHOR);
-  if (!headerCell.getValue()) headerCell.setValue("Anchor");
+  const data = sheet.getRange(2, 1, lastRow - 1, COL_DOFOLLOW).getValues();
 
   let processed = 0;
   let skipped = 0;
@@ -58,7 +53,6 @@ function checkBacklinks() {
       sheet.getRange(row, COL_EXISTS).setValue(existsVal);
       sheet.getRange(row, COL_INDEX).setValue(result.indexed);
       sheet.getRange(row, COL_DOFOLLOW).setValue(result.dofollow);
-      sheet.getRange(row, COL_ANCHOR).setValue(result.anchor);
 
       // Подсветка ячейки M
       const range = sheet.getRange(row, COL_EXISTS);
@@ -88,9 +82,6 @@ function checkSelected() {
   const startRow = selection.getRow();
   const numRows = selection.getNumRows();
 
-  const headerCell = sheet.getRange(1, COL_ANCHOR);
-  if (!headerCell.getValue()) headerCell.setValue("Anchor");
-
   for (let i = 0; i < numRows; i++) {
     const row = startRow + i;
     if (row < 2) continue; // пропускаем заголовок
@@ -110,10 +101,9 @@ function checkSelected() {
       sheet.getRange(row, COL_EXISTS).setValue(existsVal);
       sheet.getRange(row, COL_INDEX).setValue(result.indexed);
       sheet.getRange(row, COL_DOFOLLOW).setValue(result.dofollow);
-      sheet.getRange(row, COL_ANCHOR).setValue(result.anchor);
       Utilities.sleep(500);
     } catch (e) {
-      sheet.getRange(row, COL_EXISTS).setValue("Error");
+      sheet.getRange(row, COL_EXISTS).setValue("Other"); // "Error" нарушает data validation
     }
   }
 
@@ -189,13 +179,12 @@ function testAPIAndWrite() {
 
     if (code === 200) {
       const result = JSON.parse(text);
-      Logger.log("exists=" + result.exists + " indexed=" + result.indexed + " dofollow=" + result.dofollow + " anchor=" + result.anchor);
+      Logger.log("exists=" + result.exists + " indexed=" + result.indexed + " dofollow=" + result.dofollow);
 
       // 4. Пишем в реальные ячейки
       sheet.getRange(testRow, COL_EXISTS).setValue(result.exists || "N/A");
       sheet.getRange(testRow, COL_INDEX).setValue(result.indexed || "N/A");
       sheet.getRange(testRow, COL_DOFOLLOW).setValue(result.dofollow || "N/A");
-      sheet.getRange(testRow, COL_ANCHOR).setValue(result.anchor || "");
       SpreadsheetApp.flush();
       Logger.log("Данные записаны в строку " + testRow);
     }
