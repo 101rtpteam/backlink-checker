@@ -293,9 +293,11 @@ def _is_js_rendered(html: str) -> bool:
 
 def _is_blocked(status_code: Optional[int], error: Optional[str]) -> bool:
     """Вернуть True, если прямой запрос не дал HTML — нужен fallback через site:."""
-    if status_code in (403, 401, 429, 503, 999):
+    # 404/410 и несуществующий домен — это окончательный ответ, обходить нечего.
+    # Fallback имеет смысл только когда сайт отвечает, но режет ботов.
+    if status_code in (401, 403, 429, 503, 520, 521, 522, 523, 524, 999):
         return True
-    if error and any(k in error for k in ("DNS", "Timeout", "Ошибка соединения", "HTTP 4", "HTTP 5")):
+    if error and any(k in error for k in ("Timeout", "Ошибка соединения")):
         return True
     return False
 
@@ -468,7 +470,7 @@ async def check_url_direct(
         return LinkResult(url=page_url, found=False, links=[], status_code=None, error="Timeout")
     except httpx.ConnectError as e:
         msg = (
-            "DNS: сайт недоступен"
+            "DNS: домен не существует — проверьте адрес"
             if any(k in str(e) for k in ("Name or service not known", "Errno -3", "Errno 8"))
             else "Ошибка соединения"
         )
@@ -486,19 +488,33 @@ async def check_url(
 
     result = await check_url_direct(client, page_url, targets)
 
-    # Если прямой запрос заблокирован/недоступен — fallback через site:
+    # Если прямой запрос заблокирован — пробуем fallback через site: + Googlebot
     if not result.found and _is_blocked(result.status_code, result.error):
         fallback = await check_url_via_site_operator(client, page_url, targets)
-        # Оставляем fallback-результат, но сохраняем исходный HTTP-статус для информации
-        fallback.status_code = result.status_code
-        return fallback
+        if fallback.found:
+            fallback.status_code = result.status_code
+            return fallback
+        # Fallback не помог — показываем исходную причину, а не ошибку Google
+        result.error = f"{result.error or 'HTTP ' + str(result.status_code)} (сайт блокирует проверку — откройте вручную)"
+        return result
 
+    if result.status_code in (404, 410):
+        result.error = f"HTTP {result.status_code}: страница не найдена — проверьте URL"
     return result
 
 
 # ── Indexation checker ────────────────────────────────────────────────────────
 
 async def check_indexed(client: httpx.AsyncClient, page_url: str) -> tuple:
+    """Одна повторная попытка при временных сбоях DataForSEO (5xx, Internal SE Server Error)."""
+    indexed, err = await _check_indexed_once(client, page_url)
+    if indexed is None and err and ("50" in err[:30] or "Internal" in err or "Timeout" in err or "timed out" in err.lower()):
+        await asyncio.sleep(2)
+        indexed, err = await _check_indexed_once(client, page_url)
+    return indexed, err
+
+
+async def _check_indexed_once(client: httpx.AsyncClient, page_url: str) -> tuple:
     clean = page_url.replace("https://", "").replace("http://", "").rstrip("/")
     try:
         resp = await client.post(
@@ -577,7 +593,7 @@ async def ws_check(ws: WebSocket):
     try:
         req = await ws.receive_json()
         urls           = [u.strip() for u in req.get("urls", [])           if u.strip()]
-        target_domains = [d.strip() for d in req.get("target_domains", ["101rtp.com"]) if d.strip()]
+        target_domains = [d.strip() for d in req.get("target_domains", ["101rtp.com", "101rtp.net"]) if d.strip()]
         skip_indexation = req.get("skip_indexation", False)
 
         # Дедупликация URL
@@ -808,7 +824,8 @@ tr.new-row { animation: fadeIn 0.3s ease; }
       <div class="grid2">
         <div>
           <label for="domains">Домены для поиска <span style="color:#475569;font-weight:400;text-transform:none">(каждый с новой строки)</span></label>
-          <textarea id="domains" style="min-height:80px" placeholder="101rtp.com&#10;another-domain.com">101rtp.com</textarea>
+          <textarea id="domains" style="min-height:80px" placeholder="101rtp.com&#10;another-domain.com">101rtp.com
+101rtp.net</textarea>
         </div>
         <div>
           <label for="urls">URL страниц <span style="color:#475569;font-weight:400;text-transform:none">(каждый с новой строки)</span></label>
@@ -989,8 +1006,9 @@ function appendRow(r) {
 
   const isJsWarning = !r.found && r.error && r.error.includes('JS');
   const isDns       = !r.found && r.error && r.error.includes('DNS');
+  const is404       = !r.found && (r.status_code === 404 || r.status_code === 410);
   const isTimeout   = !r.found && r.error && r.error.includes('Timeout');
-  const isBlocked   = !r.found && r.error && (r.error.includes('заблокир') || r.error.includes('кэше'));
+  const isBlocked   = !r.found && r.error && (r.error.includes('заблокир') || r.error.includes('блокирует') || r.error.includes('кэше'));
 
   const linkBadge = r.found && r.via_cache
     ? '<span class="badge badge-cache" title="Прямой доступ заблокирован — ссылка найдена в SERP-кэше">⟳ Via Cache</span>'
@@ -999,7 +1017,9 @@ function appendRow(r) {
       : isJsWarning
         ? `<span class="badge" style="background:#2a2000;color:#fbbf24" title="${r.error}">⚠ JS-рендеринг</span>`
         : isDns
-          ? `<span class="badge" style="background:#1e1e2a;color:#94a3b8" title="${r.error}">⊘ Недоступен</span>`
+          ? `<span class="badge" style="background:#1e1e2a;color:#94a3b8" title="${r.error}">⊘ Нет домена</span>`
+          : is404
+          ? `<span class="badge badge-missing" title="${r.error}">✗ 404</span>`
           : isTimeout
             ? `<span class="badge" style="background:#1e1e2a;color:#94a3b8" title="${r.error}">⊘ Таймаут</span>`
             : isBlocked

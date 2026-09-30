@@ -10,7 +10,7 @@
 const API_URL = "https://backlink-checker.up.railway.app/api/check-single";
 
 // Домены которые ищем на страницах гест-постов
-const TARGET_DOMAINS = ["101rtp.com", "101rtp.nz", "101-rtp.nz"];
+const TARGET_DOMAINS = ["101rtp.com", "101rtp.net", "101rtp.nz", "101-rtp.nz"];
 
 // Колонки (1 = A)
 const COL_STATUS       = 11;  // K — статус статьи
