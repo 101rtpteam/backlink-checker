@@ -766,7 +766,7 @@ button:hover { background: #4f46e5; }
 async def login_page(request: Request):
     if _check_session(request):
         return Response(status_code=302, headers={"Location": "/"})
-    return LOGIN_PAGE.format(error="")
+    return LOGIN_PAGE.replace("{error}", "")
 
 @app.post("/login")
 async def login_submit(request: Request):
@@ -779,7 +779,7 @@ async def login_submit(request: Request):
         resp = Response(status_code=302, headers={"Location": "/"})
         resp.set_cookie("session", token, httponly=True, samesite="lax", max_age=86400 * 30)
         return resp
-    page = LOGIN_PAGE.format(error='<p class="error">Неверный логин или пароль</p>')
+    page = LOGIN_PAGE.replace("{error}", '<p class="error">Неверный логин или пароль</p>')
     return HTMLResponse(content=page, status_code=401)
 
 @app.post("/logout")
