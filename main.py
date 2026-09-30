@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import secrets
 import json
 import os
 import sqlite3
@@ -61,22 +60,6 @@ DB_PATH = _data_dir / "history.db"
 # Ошибки (нет баланса, таймаут) не кэшируются никогда.
 INDEX_CACHE_TTL_POSITIVE_H = float(os.environ.get("INDEX_CACHE_TTL_POSITIVE_HOURS", 24 * 14))
 INDEX_CACHE_TTL_NEGATIVE_H = float(os.environ.get("INDEX_CACHE_TTL_NEGATIVE_HOURS", 24 * 2))
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-AUTH_USER     = os.environ.get("AUTH_USER",     "101RTP")
-AUTH_PASSWORD = os.environ.get("AUTH_PASSWORD", "SEO101")
-
-# in-memory сессии: token -> True
-_sessions: dict = {}
-
-def _make_token() -> str:
-    return secrets.token_hex(32)
-
-def _check_session(request: Request) -> bool:
-    token = request.cookies.get("session")
-    return bool(token and token in _sessions)
-
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -590,11 +573,6 @@ async def check_indexed_cached(client: httpx.AsyncClient, page_url: str) -> dict
 
 @app.websocket("/ws/check")
 async def ws_check(ws: WebSocket):
-    # Проверяем сессию через cookie
-    token = ws.cookies.get("session")
-    if not token or token not in _sessions:
-        await ws.close(code=4001)
-        return
     await ws.accept()
     try:
         req = await ws.receive_json()
@@ -699,18 +677,12 @@ async def check_single(req: SingleCheckRequest):
 # ── REST: history ─────────────────────────────────────────────────────────────
 
 @app.get("/history")
-def get_history(request: Request):
-    if not _check_session(request):
-        from fastapi import HTTPException
-        raise HTTPException(401, "Unauthorized")
+def get_history():
     return load_runs()
 
 
 @app.get("/history/{run_id}")
-def get_run(run_id: int, request: Request):
-    if not _check_session(request):
-        from fastapi import HTTPException
-        raise HTTPException(401, "Unauthorized")
+def get_run(run_id: int):
     data = load_run_results(run_id)
     if not data:
         from fastapi import HTTPException
@@ -718,78 +690,13 @@ def get_run(run_id: int, request: Request):
     return data
 
 
-# ── Auth routes ──────────────────────────────────────────────────────────────
+# ── Legacy login URLs → главная (вход отключён) ──────────────────────────────
 
-LOGIN_PAGE = """<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Backlink Checker — Вход</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-       background: #0f1117; color: #e2e8f0; min-height: 100vh;
-       display: flex; align-items: center; justify-content: center; }
-.card { background: #1e2130; border: 1px solid #2d3348; border-radius: 16px;
-        padding: 40px; width: 100%; max-width: 360px; }
-h1 { font-size: 1.3rem; font-weight: 700; margin-bottom: 6px; color: #f8fafc; }
-.sub { color: #64748b; font-size: 0.85rem; margin-bottom: 28px; }
-label { display: block; font-size: 0.75rem; font-weight: 600; color: #94a3b8;
-        text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
-input { width: 100%; padding: 10px 14px; background: #0f1117; border: 1px solid #2d3348;
-        border-radius: 8px; color: #e2e8f0; font-size: 0.95rem; outline: none; margin-bottom: 16px; }
-input:focus { border-color: #6366f1; }
-button { width: 100%; padding: 12px; background: #6366f1; color: white; border: none;
-         border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; }
-button:hover { background: #4f46e5; }
-.error { color: #ef4444; font-size: 0.82rem; margin-bottom: 14px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>🔗 Backlink Checker</h1>
-  <p class="sub">101RTP Internal Tool</p>
-  {error}
-  <form method="post" action="/login">
-    <label>Логин</label>
-    <input type="text" name="username" autocomplete="username" required>
-    <label>Пароль</label>
-    <input type="password" name="password" autocomplete="current-password" required>
-    <button type="submit">Войти</button>
-  </form>
-</div>
-</body>
-</html>"""
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    if _check_session(request):
-        return Response(status_code=302, headers={"Location": "/"})
-    return LOGIN_PAGE.replace("{error}", "")
-
+@app.get("/login")
 @app.post("/login")
-async def login_submit(request: Request):
-    form = await request.form()
-    username = form.get("username", "")
-    password = form.get("password", "")
-    if username == AUTH_USER and password == AUTH_PASSWORD:
-        token = _make_token()
-        _sessions[token] = True
-        resp = Response(status_code=302, headers={"Location": "/"})
-        resp.set_cookie("session", token, httponly=True, samesite="lax", max_age=86400 * 30)
-        return resp
-    page = LOGIN_PAGE.replace("{error}", '<p class="error">Неверный логин или пароль</p>')
-    return HTMLResponse(content=page, status_code=401)
-
 @app.post("/logout")
-async def logout(request: Request, response: Response):
-    token = request.cookies.get("session")
-    if token and token in _sessions:
-        del _sessions[token]
-    resp = Response(status_code=302, headers={"Location": "/login"})
-    resp.delete_cookie("session")
-    return resp
+async def legacy_login():
+    return Response(status_code=302, headers={"Location": "/"})
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
@@ -801,9 +708,7 @@ def health():
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    if not _check_session(request):
-        return Response(status_code=302, headers={"Location": "/login"})
+async def index():
     return HTML_PAGE
 
 
